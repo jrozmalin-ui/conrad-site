@@ -1,11 +1,14 @@
 <!DOCTYPE html>
-<html lang="{{ str_replace('_', '-', app()->getLocale()) }}" class="scroll-smooth">
+<html lang="{{ str_replace('_', '-', app()->getLocale()) }}">
     <head>
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <meta name="description" content="Premium home care in Cumbria — restoring surfaces, air, and the feeling of a considered home. Calm authority, showroom standards.">
 
         <title>The Cumbria Cleaning Company — Premium Home Care in Cumbria</title>
+
+        {{-- First sequence frame — decoded before user reaches the cinematic block. --}}
+        <link rel="preload" href="{{ asset('sequence/ezgif-frame-001.jpg') }}" as="image">
 
         <link rel="preconnect" href="https://fonts.bunny.net">
         <link href="https://fonts.bunny.net/css?family=cormorant-garamond:400,500,600|dm-sans:400,500,600" rel="stylesheet" />
@@ -140,7 +143,7 @@
                             >
                             <canvas
                                 data-sequence-canvas
-                                class="pointer-events-none absolute inset-0 z-10 h-full w-full opacity-0 transition-opacity duration-500"
+                                class="pointer-events-none absolute inset-0 z-10 h-full w-full opacity-0"
                             ></canvas>
                         </div>
                     </div>

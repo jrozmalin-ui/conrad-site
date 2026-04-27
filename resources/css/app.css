@@ -12,14 +12,12 @@
 }
 
 @layer base {
+    /**
+     * Scroll-linked canvas sequences need subframe-accurate scroll positions.
+     * Global smooth scrolling breaks scrubbing and delays scroll response for in-page anchors.
+     */
     html {
-        scroll-behavior: smooth;
-    }
-
-    @media (prefers-reduced-motion: reduce) {
-        html {
-            scroll-behavior: auto;
-        }
+        scroll-behavior: auto;
     }
 }
 

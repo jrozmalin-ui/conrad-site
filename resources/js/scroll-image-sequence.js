@@ -68,6 +68,17 @@ function bgFillStyle(root) {
     return root.dataset.sequenceBg ?? '#090909';
 }
 
+/**
+ * Yield so the browser can paint and handle input — avoids long tasks when many JPEGs finish at once.
+ *
+ * @returns {Promise<void>}
+ */
+function yieldToMain() {
+    return new Promise((resolve) => {
+        requestAnimationFrame(() => resolve());
+    });
+}
+
 export function initScrollImageSequence(root) {
     if (!(root instanceof HTMLElement)) {
         return () => {};
@@ -96,6 +107,8 @@ export function initScrollImageSequence(root) {
     const failed = new Set();
     let frameCount = 0;
     let animationFrame = 0;
+    /** @type {ResizeObserver | null} */
+    let resizeObserver = null;
     let lastPreloadCenter = -1;
     /** @type {number} Smoothed scroll progress for buttery scrubbing (-1 = unset). */
     let displayProgress = -1;
@@ -206,13 +219,55 @@ export function initScrollImageSequence(root) {
         const path = `/sequence/${framePath(template, index, start, pad)}`;
 
         try {
-            images[index] = await loadImage(path);
+            const img = await loadImage(path);
+            images[index] = img;
         } catch {
             failed.add(index);
         }
     };
 
+    /**
+     * Load a contiguous range with low concurrency + yields so first visit does not freeze the tab.
+     *
+     * @param {number} fromIdx
+     * @param {number} toIdx
+     * @param {number} concurrency
+     */
+    const preloadRange = async (fromIdx, toIdx, concurrency = 4) => {
+        const lo = Math.max(0, Math.floor(fromIdx));
+        const hi = Math.min(frameCount - 1, Math.floor(toIdx));
+
+        if (hi < lo) {
+            return;
+        }
+
+        const indices = [];
+
+        for (let i = lo; i <= hi; i++) {
+            indices.push(i);
+        }
+
+        const cc = Number(root.dataset.preloadConcurrency ?? concurrency);
+        const chunkCap = Number.isFinite(cc) && cc >= 1 ? Math.min(12, Math.floor(cc)) : concurrency;
+
+        for (let offset = 0; offset < indices.length; offset += chunkCap) {
+            const chunk = indices.slice(offset, offset + chunkCap);
+
+            await Promise.all(chunk.map((idx) => ensureFrame(idx)));
+            await yieldToMain();
+        }
+    };
+
+    /** Incremented when scrub head moves — abandons stale preload work so fast scroll does not stack work. */
+    let preloadGeneration = 0;
+
+    /**
+     * Load frames around the scrub head in small batches with yields between batches.
+     *
+     * @param {number} centerIndex
+     */
     const preloadAround = (centerIndex) => {
+        const gen = ++preloadGeneration;
         const windowSize = Number(root.dataset.preloadWindow ?? 10);
         const indices = [];
 
@@ -224,32 +279,23 @@ export function initScrollImageSequence(root) {
 
         unique.sort((a, b) => Math.abs(a - centerIndex) - Math.abs(b - centerIndex));
 
-        const schedule = (fn) => {
-            if ('requestIdleCallback' in window) {
-                window.requestIdleCallback(fn, { timeout: 160 });
-            } else {
-                setTimeout(fn, 0);
+        const batchSizeRaw = Number(root.dataset.preloadBatch ?? 4);
+        const batchSize = Number.isFinite(batchSizeRaw) && batchSizeRaw >= 1 ? Math.min(16, Math.floor(batchSizeRaw)) : 4;
+
+        const pump = async () => {
+            for (let offset = 0; offset < unique.length; offset += batchSize) {
+                if (gen !== preloadGeneration) {
+                    return;
+                }
+
+                const chunk = unique.slice(offset, offset + batchSize);
+
+                await Promise.all(chunk.map((idx) => ensureFrame(idx)));
+                await yieldToMain();
             }
         };
 
-        let i = 0;
-
-        const pump = () => {
-            if (i >= unique.length) {
-                return;
-            }
-
-            const idx = unique[i];
-            i++;
-
-            if (!(images[idx] instanceof HTMLImageElement)) {
-                ensureFrame(idx).finally(() => schedule(pump));
-            } else {
-                schedule(pump);
-            }
-        };
-
-        schedule(pump);
+        void pump();
     };
 
     /**
@@ -412,7 +458,10 @@ export function initScrollImageSequence(root) {
     const onResize = () => {
         resize();
 
-        render(prefersReducedMotion ? 1 : getScrollProgress());
+        const p = prefersReducedMotion ? 1 : getScrollProgress();
+
+        render(p);
+        updateStoryChapters(p);
     };
 
     const init = async () => {
@@ -441,18 +490,55 @@ export function initScrollImageSequence(root) {
         } else {
             images = Array.from({ length: frameCount }, () => undefined);
 
+            const maxIdx = frameCount - 1;
+
             await ensureFrame(0);
-            await ensureFrame(frameCount - 1);
+            await ensureFrame(maxIdx);
 
             canvas.classList.remove('opacity-0');
 
             if (fallback instanceof HTMLElement) {
                 fallback.classList.add('transition-opacity', 'duration-700');
             }
+
+            const windowSize = Number(root.dataset.preloadWindow ?? 14);
+
+            /**
+             * Never block the RAF loop on a large eager decode — if the user reaches this section while
+             * frames are still loading, chapters and scroll mapping must still run.
+             */
+            if (!prefersReducedMotion) {
+                const eagerSpan = Number(root.dataset.eagerPreloadSpan ?? windowSize * 2 + 24);
+                const eagerEnd = Math.min(maxIdx, Number.isFinite(eagerSpan) ? eagerSpan : maxIdx);
+
+                /**
+                 * Defer bulk preload until after first paint — cold visitors were hitting long main-thread
+                 * stalls while the hero was still settling (fonts, layout).
+                 */
+                requestAnimationFrame(() => {
+                    requestAnimationFrame(() => {
+                        void preloadRange(0, eagerEnd, 4);
+                        preloadAround(0);
+                    });
+                });
+            }
         }
 
         resize();
         render(prefersReducedMotion ? 1 : getScrollProgress());
+        updateStoryChapters(prefersReducedMotion ? 1 : getScrollProgress());
+
+        requestAnimationFrame(() => {
+            resize();
+            render(prefersReducedMotion ? 1 : getScrollProgress());
+            updateStoryChapters(prefersReducedMotion ? 1 : getScrollProgress());
+        });
+
+        resizeObserver = new ResizeObserver(() => {
+            onResize();
+        });
+        resizeObserver.observe(canvas);
+
         animationFrame = requestAnimationFrame(loop);
 
         window.addEventListener('resize', onResize, { passive: true });
@@ -470,6 +556,8 @@ export function initScrollImageSequence(root) {
 
         teardown = () => {
             cancelAnimationFrame(animationFrame);
+            resizeObserver?.disconnect();
+            resizeObserver = null;
             window.removeEventListener('resize', onResize);
             mq.removeEventListener('change', onMotion);
         };
