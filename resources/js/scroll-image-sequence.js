@@ -1,0 +1,336 @@
+/**
+ * Scroll-driven canvas image sequence with lazy preload and fractional blending.
+ *
+ * Add extracted frames to public/sequence/ and set frameCount in manifest.json.
+ */
+
+const DEFAULT_MANIFEST_URL = '/sequence/manifest.json';
+
+/**
+ * @param {HTMLCanvasElement} _canvas
+ * @param {number} destW
+ * @param {number} destH
+ * @param {CanvasRenderingContext2D} ctx
+ * @param {HTMLImageElement} img
+ * @param {number} alpha
+ */
+function drawImageCover(_canvas, destW, destH, ctx, img, alpha = 1) {
+    if (!img?.naturalWidth) {
+        return;
+    }
+
+    const iw = img.naturalWidth;
+    const ih = img.naturalHeight;
+    const scale = Math.max(destW / iw, destH / ih);
+    const dw = iw * scale;
+    const dh = ih * scale;
+    const dx = (destW - dw) / 2;
+    const dy = (destH - dh) / 2;
+
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.drawImage(img, dx, dy, dw, dh);
+    ctx.restore();
+}
+
+/**
+ * @param {string} template
+ * @param {number} index zero-based frame index
+ * @param {number} indexStart
+ * @param {number} pad
+ */
+function framePath(template, index, indexStart, pad) {
+    const n = indexStart + index;
+    const padded = pad > 0 ? String(n).padStart(pad, '0') : String(n);
+
+    return template.replace(/\{index\}/g, padded).replace(/\{i\}/g, padded);
+}
+
+export function initScrollImageSequence(root) {
+    if (!(root instanceof HTMLElement)) {
+        return () => {};
+    }
+
+    const canvas = root.querySelector('[data-sequence-canvas]');
+    const fallback = root.querySelector('[data-sequence-fallback]');
+
+    if (!canvas || !(canvas instanceof HTMLCanvasElement)) {
+        return () => {};
+    }
+
+    const ctx = canvas.getContext('2d', { alpha: false });
+    if (!ctx) {
+        return () => {};
+    }
+
+    const manifestUrl = root.dataset.manifestUrl || DEFAULT_MANIFEST_URL;
+    let prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+    /** @type {{ frameCount: number, filenameTemplate?: string, indexStart?: number, indexPad?: number, invertFrames?: boolean } | null} */
+    let manifest = null;
+    /** @type {(HTMLImageElement | undefined)[]} */
+    let images = [];
+    /** @type {Set<number>} */
+    const failed = new Set();
+    let frameCount = 0;
+    let animationFrame = 0;
+    let lastPreloadCenter = -1;
+    let teardown = () => {};
+
+    const resize = () => {
+        const rect = canvas.getBoundingClientRect();
+        const w = rect.width;
+        const h = rect.height;
+        const dpr = Math.min(window.devicePixelRatio || 1, root.dataset.maxDpr ? Number(root.dataset.maxDpr) : 2);
+
+        canvas.width = Math.max(1, Math.floor(w * dpr));
+        canvas.height = Math.max(1, Math.floor(h * dpr));
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    };
+
+    const getScrollProgress = () => {
+        const rect = root.getBoundingClientRect();
+        const total = rect.height - window.innerHeight;
+        if (total <= 0) {
+            return 0;
+        }
+
+        let p = -rect.top / total;
+        if (p < 0) {
+            p = 0;
+        }
+        if (p > 1) {
+            p = 1;
+        }
+
+        return p;
+    };
+
+    const loadImage = (url) =>
+        new Promise((resolve, reject) => {
+            const img = new Image();
+            img.decoding = 'async';
+            img.onload = () => resolve(img);
+            img.onerror = () => reject(new Error(`Failed to load ${url}`));
+            img.src = url;
+        });
+
+    /** @param {number} index */
+    const ensureFrame = async (index) => {
+        if (!manifest || frameCount === 0 || index < 0 || index >= frameCount) {
+            return;
+        }
+
+        if (images[index] instanceof HTMLImageElement || failed.has(index)) {
+            return;
+        }
+
+        const template = manifest.filenameTemplate ?? 'frame_{index}.jpg';
+        const pad = manifest.indexPad ?? 4;
+        const start = manifest.indexStart ?? 0;
+        const path = `/sequence/${framePath(template, index, start, pad)}`;
+
+        try {
+            images[index] = await loadImage(path);
+        } catch {
+            failed.add(index);
+        }
+    };
+
+    const preloadAround = (centerIndex) => {
+        const windowSize = Number(root.dataset.preloadWindow ?? 10);
+        const indices = [];
+
+        for (let d = 0; d <= windowSize; d++) {
+            indices.push(centerIndex + d, centerIndex - d);
+        }
+
+        const unique = [...new Set(indices)].filter((i) => i >= 0 && i < frameCount);
+
+        unique.sort((a, b) => Math.abs(a - centerIndex) - Math.abs(b - centerIndex));
+
+        const schedule = (fn) => {
+            if ('requestIdleCallback' in window) {
+                window.requestIdleCallback(fn, { timeout: 160 });
+            } else {
+                setTimeout(fn, 0);
+            }
+        };
+
+        let i = 0;
+
+        const pump = () => {
+            if (i >= unique.length) {
+                return;
+            }
+
+            const idx = unique[i];
+            i++;
+
+            if (!(images[idx] instanceof HTMLImageElement)) {
+                ensureFrame(idx).finally(() => schedule(pump));
+            } else {
+                schedule(pump);
+            }
+        };
+
+        schedule(pump);
+    };
+
+    const render = (progress) => {
+        const w = canvas.clientWidth;
+        const h = canvas.clientHeight;
+
+        if (w <= 0 || h <= 0) {
+            return;
+        }
+
+        ctx.fillStyle = '#2B2B2B';
+        ctx.fillRect(0, 0, w, h);
+
+        if (frameCount === 0 || prefersReducedMotion) {
+            if (fallback instanceof HTMLImageElement && fallback.complete && fallback.naturalWidth) {
+                drawImageCover(canvas, w, h, ctx, fallback, 1);
+            }
+
+            return;
+        }
+
+        const maxIdx = frameCount - 1;
+        let mapped = progress * maxIdx;
+
+        if (manifest?.invertFrames) {
+            mapped = maxIdx - mapped;
+        }
+
+        const i = Math.floor(mapped);
+        const frac = mapped - i;
+        const i0 = Math.max(0, Math.min(maxIdx, i));
+        const i1 = Math.max(0, Math.min(maxIdx, i0 + 1));
+
+        const imgA = images[i0];
+        const imgB = images[i1];
+
+        if (imgA instanceof HTMLImageElement) {
+            drawImageCover(canvas, w, h, ctx, imgA, 1);
+        } else if (fallback instanceof HTMLImageElement && fallback.complete && fallback.naturalWidth) {
+            drawImageCover(canvas, w, h, ctx, fallback, 1);
+        }
+
+        if (imgB instanceof HTMLImageElement && imgA !== imgB && frac > 0.004) {
+            drawImageCover(canvas, w, h, ctx, imgB, frac);
+        }
+
+        if (fallback instanceof HTMLElement && imgA instanceof HTMLImageElement) {
+            fallback.classList.add('opacity-0', 'pointer-events-none');
+        }
+    };
+
+    const updateOverlays = (progress) => {
+        root.querySelectorAll('[data-sequence-overlay]').forEach((el) => {
+            if (!(el instanceof HTMLElement)) {
+                return;
+            }
+
+            const from = Number(el.dataset.from ?? 0);
+            const to = Number(el.dataset.to ?? 1);
+            const endsAtFinish = to >= 0.999;
+            const inRange = progress >= from && (endsAtFinish ? progress <= 1 : progress < to);
+            el.style.opacity = inRange ? '1' : '0';
+            el.style.transform = inRange ? 'translateY(0)' : 'translateY(10px)';
+        });
+    };
+
+    const loop = () => {
+        const progress = prefersReducedMotion ? 1 : getScrollProgress();
+
+        render(progress);
+        updateOverlays(progress);
+
+        if (frameCount > 0 && !prefersReducedMotion) {
+            const maxIdx = Math.max(0, frameCount - 1);
+            let mapped = progress * maxIdx;
+
+            if (manifest?.invertFrames) {
+                mapped = maxIdx - mapped;
+            }
+
+            const center = Math.floor(mapped);
+
+            if (center !== lastPreloadCenter) {
+                lastPreloadCenter = center;
+                preloadAround(center);
+            }
+        }
+
+        animationFrame = requestAnimationFrame(loop);
+    };
+
+    const onResize = () => {
+        resize();
+
+        render(prefersReducedMotion ? 1 : getScrollProgress());
+    };
+
+    const init = async () => {
+        try {
+            const res = await fetch(manifestUrl, { cache: 'force-cache' });
+
+            if (res.ok) {
+                manifest = await res.json();
+                frameCount = Number(manifest?.frameCount ?? 0);
+            }
+        } catch {
+            manifest = null;
+            frameCount = 0;
+        }
+
+        if (!Number.isFinite(frameCount) || frameCount < 1) {
+            frameCount = 0;
+            images = [];
+            failed.clear();
+
+            if (fallback instanceof HTMLElement) {
+                fallback.classList.remove('opacity-0', 'pointer-events-none');
+            }
+
+            canvas.classList.add('opacity-0');
+        } else {
+            images = Array.from({ length: frameCount }, () => undefined);
+
+            await ensureFrame(0);
+            await ensureFrame(frameCount - 1);
+
+            canvas.classList.remove('opacity-0');
+
+            if (fallback instanceof HTMLElement) {
+                fallback.classList.add('transition-opacity', 'duration-700');
+            }
+        }
+
+        resize();
+        render(prefersReducedMotion ? 1 : getScrollProgress());
+        animationFrame = requestAnimationFrame(loop);
+
+        window.addEventListener('resize', onResize, { passive: true });
+
+        const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
+
+        const onMotion = () => {
+            prefersReducedMotion = mq.matches;
+            render(prefersReducedMotion ? 1 : getScrollProgress());
+        };
+
+        mq.addEventListener('change', onMotion);
+
+        teardown = () => {
+            cancelAnimationFrame(animationFrame);
+            window.removeEventListener('resize', onResize);
+            mq.removeEventListener('change', onMotion);
+        };
+    };
+
+    init();
+
+    return () => teardown();
+}

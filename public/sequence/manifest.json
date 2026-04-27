@@ -1,0 +1,7 @@
+{
+    "frameCount": 240,
+    "filenameTemplate": "ezgif-frame-{index}.jpg",
+    "indexStart": 1,
+    "indexPad": 3,
+    "invertFrames": false
+}
