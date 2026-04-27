@@ -1,10 +1,14 @@
 /**
- * Scroll-driven canvas image sequence with lazy preload and fractional blending.
- *
- * Add extracted frames to public/sequence/ and set frameCount in manifest.json.
+ * Scroll-driven canvas image sequence — contain fit, fractional blending, chapter UI.
  */
 
 const DEFAULT_MANIFEST_URL = '/sequence/manifest.json';
+
+/**
+ * Flip frame order so scroll runs messy → clean when source files are clean → messy (or vice versa).
+ * Toggle here, or override per section with data-reverse-sequence="true|false".
+ */
+const REVERSE_SEQUENCE = false;
 
 /**
  * @param {HTMLCanvasElement} _canvas
@@ -14,14 +18,14 @@ const DEFAULT_MANIFEST_URL = '/sequence/manifest.json';
  * @param {HTMLImageElement} img
  * @param {number} alpha
  */
-function drawImageCover(_canvas, destW, destH, ctx, img, alpha = 1) {
+function drawImageContain(_canvas, destW, destH, ctx, img, alpha = 1) {
     if (!img?.naturalWidth) {
         return;
     }
 
     const iw = img.naturalWidth;
     const ih = img.naturalHeight;
-    const scale = Math.max(destW / iw, destH / ih);
+    const scale = Math.min(destW / iw, destH / ih);
     const dw = iw * scale;
     const dh = ih * scale;
     const dx = (destW - dw) / 2;
@@ -46,6 +50,24 @@ function framePath(template, index, indexStart, pad) {
     return template.replace(/\{index\}/g, padded).replace(/\{i\}/g, padded);
 }
 
+/**
+ * @param {HTMLElement} root
+ */
+function resolveReverseFrames(root) {
+    if (root.dataset.reverseSequence !== undefined) {
+        return root.dataset.reverseSequence === 'true';
+    }
+
+    return REVERSE_SEQUENCE;
+}
+
+/**
+ * @param {HTMLElement} root
+ */
+function bgFillStyle(root) {
+    return root.dataset.sequenceBg ?? '#090909';
+}
+
 export function initScrollImageSequence(root) {
     if (!(root instanceof HTMLElement)) {
         return () => {};
@@ -66,7 +88,7 @@ export function initScrollImageSequence(root) {
     const manifestUrl = root.dataset.manifestUrl || DEFAULT_MANIFEST_URL;
     let prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-    /** @type {{ frameCount: number, filenameTemplate?: string, indexStart?: number, indexPad?: number, invertFrames?: boolean } | null} */
+    /** @type {{ frameCount: number, filenameTemplate?: string, indexStart?: number, indexPad?: number } | null} */
     let manifest = null;
     /** @type {(HTMLImageElement | undefined)[]} */
     let images = [];
@@ -75,7 +97,60 @@ export function initScrollImageSequence(root) {
     let frameCount = 0;
     let animationFrame = 0;
     let lastPreloadCenter = -1;
+    /** @type {number} Smoothed scroll progress for buttery scrubbing (-1 = unset). */
+    let displayProgress = -1;
     let teardown = () => {};
+
+    const scrollSmoothing = () => {
+        const k = Number(root.dataset.scrollSmoothing ?? 0.11);
+        if (!Number.isFinite(k) || k <= 0) {
+            return 1;
+        }
+
+        return Math.min(1, Math.max(0.02, k));
+    };
+
+    /**
+     * Edge feather for chapter crossfades (fraction of total scroll distance).
+     */
+    const chapterFeather = () => {
+        const f = Number(root.dataset.chapterFeather ?? 0.028);
+        if (!Number.isFinite(f) || f <= 0) {
+            return 0;
+        }
+
+        return Math.min(0.08, f);
+    };
+
+    /**
+     * @param {number} p
+     * @param {number} from
+     * @param {number} to
+     * @param {number} feather
+     */
+    const chapterOpacitySoft = (p, from, to, feather) => {
+        if (p < from || p > to) {
+            return 0;
+        }
+
+        const fadeOutAtEnd = to < 0.999;
+        const midStart = from + feather;
+        const midEnd = fadeOutAtEnd ? to - feather : to;
+
+        if (midStart >= midEnd) {
+            return 1;
+        }
+
+        if (p < midStart) {
+            return (p - from) / feather;
+        }
+
+        if (fadeOutAtEnd && p > midEnd) {
+            return (to - p) / feather;
+        }
+
+        return 1;
+    };
 
     const resize = () => {
         const rect = canvas.getBoundingClientRect();
@@ -177,6 +252,19 @@ export function initScrollImageSequence(root) {
         schedule(pump);
     };
 
+    /**
+     * Map scroll progress [0,1] to frame indices with optional reversal.
+     */
+    const progressToMappedIndex = (progress, maxIdx, reverse) => {
+        let mapped = progress * maxIdx;
+
+        if (reverse) {
+            mapped = maxIdx - mapped;
+        }
+
+        return mapped;
+    };
+
     const render = (progress) => {
         const w = canvas.clientWidth;
         const h = canvas.clientHeight;
@@ -185,23 +273,21 @@ export function initScrollImageSequence(root) {
             return;
         }
 
-        ctx.fillStyle = '#2B2B2B';
+        ctx.fillStyle = bgFillStyle(root);
         ctx.fillRect(0, 0, w, h);
+
+        const reverse = resolveReverseFrames(root);
 
         if (frameCount === 0 || prefersReducedMotion) {
             if (fallback instanceof HTMLImageElement && fallback.complete && fallback.naturalWidth) {
-                drawImageCover(canvas, w, h, ctx, fallback, 1);
+                drawImageContain(canvas, w, h, ctx, fallback, 1);
             }
 
             return;
         }
 
         const maxIdx = frameCount - 1;
-        let mapped = progress * maxIdx;
-
-        if (manifest?.invertFrames) {
-            mapped = maxIdx - mapped;
-        }
+        const mapped = progressToMappedIndex(progress, maxIdx, reverse);
 
         const i = Math.floor(mapped);
         const frac = mapped - i;
@@ -212,13 +298,13 @@ export function initScrollImageSequence(root) {
         const imgB = images[i1];
 
         if (imgA instanceof HTMLImageElement) {
-            drawImageCover(canvas, w, h, ctx, imgA, 1);
+            drawImageContain(canvas, w, h, ctx, imgA, 1);
         } else if (fallback instanceof HTMLImageElement && fallback.complete && fallback.naturalWidth) {
-            drawImageCover(canvas, w, h, ctx, fallback, 1);
+            drawImageContain(canvas, w, h, ctx, fallback, 1);
         }
 
         if (imgB instanceof HTMLImageElement && imgA !== imgB && frac > 0.004) {
-            drawImageCover(canvas, w, h, ctx, imgB, frac);
+            drawImageContain(canvas, w, h, ctx, imgB, frac);
         }
 
         if (fallback instanceof HTMLElement && imgA instanceof HTMLImageElement) {
@@ -226,7 +312,55 @@ export function initScrollImageSequence(root) {
         }
     };
 
-    const updateOverlays = (progress) => {
+    const isChapterActive = (progress, from, to) => {
+        const endsAtFinish = to >= 0.999;
+        const inRange = progress >= from && (endsAtFinish ? progress <= 1 : progress < to);
+
+        return inRange;
+    };
+
+    const updateStoryChapters = (progress) => {
+        const feather = chapterFeather();
+
+        root.querySelectorAll('[data-story-chapter]').forEach((el) => {
+            if (!(el instanceof HTMLElement)) {
+                return;
+            }
+
+            const from = Number(el.dataset.from ?? 0);
+            const to = Number(el.dataset.to ?? 1);
+            const opacity = feather > 0 ? chapterOpacitySoft(progress, from, to, feather) : (isChapterActive(progress, from, to) ? 1 : 0);
+
+            el.style.opacity = String(opacity);
+            el.style.visibility = opacity < 0.03 ? 'hidden' : 'visible';
+
+            const strength = Number(el.dataset.parallaxStrength ?? 10);
+
+            if (opacity < 0.03) {
+                el.style.transform = 'translateY(12px)';
+            } else if ((to - from) > 0.001) {
+                const span = to - from;
+                const local = (progress - from) / span;
+                const clamped = Math.min(1, Math.max(0, local));
+                const eased = Math.sin(clamped * Math.PI);
+                const px = (clamped - 0.5) * strength * 0.38 * eased;
+
+                el.style.transform = `translateY(${px}px)`;
+            } else {
+                el.style.transform = 'translateY(0)';
+            }
+
+            el.style.pointerEvents = opacity > 0.45 ? 'auto' : 'none';
+
+            const interactive = el.querySelectorAll('a, button');
+
+            interactive.forEach((node) => {
+                if (node instanceof HTMLElement) {
+                    node.tabIndex = opacity > 0.5 ? 0 : -1;
+                }
+            });
+        });
+
         root.querySelectorAll('[data-sequence-overlay]').forEach((el) => {
             if (!(el instanceof HTMLElement)) {
                 return;
@@ -242,19 +376,28 @@ export function initScrollImageSequence(root) {
     };
 
     const loop = () => {
-        const progress = prefersReducedMotion ? 1 : getScrollProgress();
+        const raw = prefersReducedMotion ? 1 : getScrollProgress();
+        const k = scrollSmoothing();
+
+        if (prefersReducedMotion) {
+            displayProgress = 1;
+        } else if (displayProgress < 0) {
+            displayProgress = raw;
+        } else if (k >= 1) {
+            displayProgress = raw;
+        } else {
+            displayProgress += (raw - displayProgress) * k;
+        }
+
+        const progress = displayProgress;
 
         render(progress);
-        updateOverlays(progress);
+        updateStoryChapters(progress);
 
         if (frameCount > 0 && !prefersReducedMotion) {
             const maxIdx = Math.max(0, frameCount - 1);
-            let mapped = progress * maxIdx;
-
-            if (manifest?.invertFrames) {
-                mapped = maxIdx - mapped;
-            }
-
+            const reverse = resolveReverseFrames(root);
+            const mapped = progressToMappedIndex(progress, maxIdx, reverse);
             const center = Math.floor(mapped);
 
             if (center !== lastPreloadCenter) {
@@ -318,7 +461,9 @@ export function initScrollImageSequence(root) {
 
         const onMotion = () => {
             prefersReducedMotion = mq.matches;
+            displayProgress = -1;
             render(prefersReducedMotion ? 1 : getScrollProgress());
+            updateStoryChapters(prefersReducedMotion ? 1 : getScrollProgress());
         };
 
         mq.addEventListener('change', onMotion);
