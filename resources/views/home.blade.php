@@ -41,7 +41,36 @@
                         Book
                     </a>
                 </nav>
-                <a href="#contact" class="btn-premium rounded-full border border-[#A8B8C8]/55 bg-[#A8B8C8]/15 px-4 py-2 text-sm font-medium text-[#2B2B2B] md:hidden">Book</a>
+                <details class="group relative md:hidden">
+                    <summary class="list-none">
+                        <span
+                            class="btn-premium inline-flex items-center gap-2 rounded-full border border-[#A8B8C8]/55 bg-[#A8B8C8]/15 px-4 py-2 text-sm font-medium text-[#2B2B2B]"
+                        >
+                            Menu
+                            <svg
+                                xmlns="http://www.w3.org/2000/svg"
+                                viewBox="0 0 20 20"
+                                fill="currentColor"
+                                class="h-4 w-4 transition-transform duration-300 group-open:rotate-180"
+                                aria-hidden="true"
+                            >
+                                <path fill-rule="evenodd" d="M5.23 7.21a.75.75 0 0 1 1.06.02L10 11.134l3.71-3.903a.75.75 0 1 1 1.08 1.04l-4.25 4.47a.75.75 0 0 1-1.08 0l-4.25-4.47a.75.75 0 0 1 .02-1.06Z" clip-rule="evenodd" />
+                            </svg>
+                        </span>
+                    </summary>
+                    <div class="absolute right-0 top-[calc(100%+0.75rem)] w-64 rounded-2xl border border-[#DCDCDC] bg-[#FAFAFA]/98 p-3 shadow-[0_18px_40px_rgb(43_43_43_/0.12)] backdrop-blur-xl">
+                        <nav class="flex flex-col gap-1.5 text-sm font-medium text-[#4B4B4B]">
+                            <a href="#transformation" class="rounded-xl px-3 py-2 transition-colors hover:bg-white hover:text-[#2B2B2B]">Story</a>
+                            <a href="#services" class="rounded-xl px-3 py-2 transition-colors hover:bg-white hover:text-[#2B2B2B]">Services</a>
+                            <a href="#pricing" class="rounded-xl px-3 py-2 transition-colors hover:bg-white hover:text-[#2B2B2B]">Pricing</a>
+                            <a href="#trust" class="rounded-xl px-3 py-2 transition-colors hover:bg-white hover:text-[#2B2B2B]">Trust</a>
+                            <a href="#team" class="rounded-xl px-3 py-2 transition-colors hover:bg-white hover:text-[#2B2B2B]">Team</a>
+                            <a href="#contact" class="mt-1 inline-flex items-center justify-center rounded-xl border border-[#A8B8C8]/55 bg-[#A8B8C8]/15 px-3 py-2 text-[#2B2B2B]">
+                                Book
+                            </a>
+                        </nav>
+                    </div>
+                </details>
             </div>
         </header>
 
